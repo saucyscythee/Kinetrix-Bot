@@ -108,12 +108,13 @@ client.on('interactionCreate', async interaction => {
                     }
                 }
 
+                // Defer reply immediately to prevent Discord 3-second timeouts on Render
+                await interaction.deferReply();
+
                 targetQueue.set(userId, Date.now());
                 const currentCount = targetQueue.size;
 
                 if (currentCount === targetSize) {
-                    await interaction.deferReply();
-
                     const playerIds = Array.from(targetQueue.keys());
                     targetQueue.clear();
 
@@ -169,7 +170,7 @@ client.on('interactionCreate', async interaction => {
                     });
                 } else {
                     const needed = targetSize - currentCount;
-                    return interaction.reply({
+                    return interaction.editReply({
                         content: `✅ <@${userId}> joined the **/${mode}** queue! (${currentCount}/${targetSize})\n*Need ${needed} more player(s) to pop.*`
                     });
                 }
@@ -205,6 +206,8 @@ client.on('interactionCreate', async interaction => {
 
             // Handle Status Command
             else if (commandName === 'status') {
+                await interaction.deferReply();
+
                 const formatQueue = (queueName, sizeLimit) => {
                     const q = queues[queueName];
                     if (q.size === 0) return `*Empty*`;
@@ -225,14 +228,20 @@ client.on('interactionCreate', async interaction => {
                     `⚔️ **3v3 (/6mans):**\n${formatQueue('6mans', 6)}\n\n` +
                     `📋 **Active Draft Status:**\n${draftStatusText}`;
 
-                return interaction.reply({
+                return interaction.editReply({
                     content: statusEmbed
                 });
             }
         } catch (error) {
             console.error(`Error executing command ${commandName}:`, error);
-            if (!interaction.replied && !interaction.deferred) {
-                await interaction.reply({ content: 'An unexpected error occurred while executing this command.', flags: 64 });
+            try {
+                if (interaction.deferred || interaction.replied) {
+                    await interaction.editReply({ content: 'An unexpected error occurred while executing this command.' });
+                } else {
+                    await interaction.reply({ content: 'An unexpected error occurred while executing this command.', flags: 64 });
+                }
+            } catch (subErr) {
+                console.error('Failed to send error reply:', subErr);
             }
         }
     } 
