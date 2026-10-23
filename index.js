@@ -36,25 +36,27 @@ const commands = [
         .setDescription('Join or manage the 6-man queue (3v3).'),
 ].map(command => command.toJSON());
 
-// Register Slash Commands with Discord API on Ready
+// Register Slash Commands with Discord API on Ready (Guild-Specific for Instant Sync)
+const GUILD_ID = '1400141445985472542';
+
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
 
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
     try {
-        console.log('Started refreshing application (/) commands.');
+        console.log('Started refreshing guild (/) commands.');
         await rest.put(
-            Routes.applicationCommands(client.user.id),
+            Routes.applicationGuildCommands(client.user.id, GUILD_ID),
             { body: commands },
         );
-        console.log('Successfully reloaded application (/) commands.');
+        console.log('Successfully reloaded guild (/) commands instantly!');
     } catch (error) {
-        console.error(error);
+        console.error('Error registering commands:', error);
     }
 });
 
-// 3. Robust Interaction Handler with Error Protection & Deferral
+// 3. Robust Interaction Handler with Immediate Deferral
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
@@ -62,13 +64,11 @@ client.on('interactionCreate', async interaction => {
 
     try {
         if (commandName === 'status') {
-            // Defer reply immediately to prevent Discord's 3-second timeout / "application did not respond" error
+            // Defer reply immediately to prevent Discord 3-second interaction timeouts
             await interaction.deferReply();
             
-            // Optional short delay for simulated processing
             await new Promise(resolve => setTimeout(resolve, 300));
 
-            // Edit the deferred response with actual status data
             await interaction.editReply({
                 content: `🟢 **Kinetrix Bot Status:** Online and operational!\n☁️ **Host:** Render Cloud (24/7 Uptime)`
             });
@@ -82,7 +82,6 @@ client.on('interactionCreate', async interaction => {
     } catch (error) {
         console.error(`Error handling command ${commandName}:`, error);
         
-        // Fallback error response if interaction fails halfway
         try {
             if (interaction.deferred || interaction.replied) {
                 await interaction.editReply({ content: 'An error occurred while executing this command.' });
