@@ -24,16 +24,11 @@ const client = new Client({
     ]
 });
 
-// Queue state stores user ID and timestamp: { userId: string, joinedAt: number }
+// Queue state stores user ID -> { joinedAt: number, channelId: string }
+// channelId is the channel the player joined from, used for timeout notifications
 const queues = {
     '4mans': new Map(),
     '6mans': new Map()
-};
-
-// Store last active channel per queue for auto-timeout announcements
-const queueChannels = {
-    '4mans': null,
-    '6mans': null
 };
 
 // Active drafts stored in memory: channelId -> draftState object
@@ -88,7 +83,6 @@ client.on('interactionCreate', async interaction => {
                 const mode = commandName;
                 const targetQueue = queues[mode];
                 const targetSize = mode === '4mans' ? 4 : 6;
-                queueChannels[mode] = channelId; // Save active channel for timeout alerts
 
                 for (const [m, q] of Object.entries(queues)) {
                     if (q.has(userId)) {
@@ -111,7 +105,8 @@ client.on('interactionCreate', async interaction => {
                 // Defer reply immediately to prevent Discord 3-second timeouts on Render
                 await interaction.deferReply();
 
-                targetQueue.set(userId, Date.now());
+                // Save join time AND the channel they joined from (for timeout notifications)
+                targetQueue.set(userId, { joinedAt: Date.now(), channelId });
                 const currentCount = targetQueue.size;
 
                 if (currentCount === targetSize) {
@@ -124,6 +119,22 @@ client.on('interactionCreate', async interaction => {
                         [playerIds[i], playerIds[j]] = [playerIds[j], playerIds[i]];
                     }
 
+                    // 2v2: random teams, no captains or draft
+                    if (mode === '4mans') {
+                        const team1 = playerIds.slice(0, 2);
+                        const team2 = playerIds.slice(2, 4);
+                        const allPings = playerIds.map(id => `<@${id}>`).join(' ');
+
+                        return interaction.editReply({
+                            content: `🚨 **/4MANS QUEUE POPPED!** 🚨\n${allPings}\n\n` +
+                                `🎲 **Teams have been randomized!**\n\n` +
+                                `🔵 **Blue Team:** ${team1.map(id => `<@${id}>`).join(', ')}\n` +
+                                `🟠 **Orange Team:** ${team2.map(id => `<@${id}>`).join(', ')}\n\n` +
+                                `*Get into voice channels and play!*`
+                        });
+                    }
+
+                    // 3v3: captains + draft
                     const cap1 = playerIds[0];
                     const cap2 = playerIds[1];
                     const poolIds = playerIds.slice(2);
@@ -272,8 +283,8 @@ client.on('interactionCreate', async interaction => {
             if (draft.pool.length === 0) {
                 activeDrafts.delete(interaction.channelId);
                 const finalSummary = `🏁 **DRAFT COMPLETE! MATCH READY!** 🏁\n\n` +
-                    `🔴 **Team 1 (<@${draft.captain1}>):** ${draft.team1.map(id => `<@${id}>`).join(', ')}\n` +
-                    `🔵 **Team 2 (<@${draft.captain2}>):** ${draft.team2.map(id => `<@${id}>`).join(', ')}\n\n` +
+                    `🔵 **Blue Team (<@${draft.captain1}>):** ${draft.team1.map(id => `<@${id}>`).join(', ')}\n` +
+                    `🟠 **Orange Team (<@${draft.captain2}>):** ${draft.team2.map(id => `<@${id}>`).join(', ')}\n\n` +
                     `*Get into voice channels and play!*`;
 
                 return interaction.update({
@@ -282,8 +293,8 @@ client.on('interactionCreate', async interaction => {
                 });
             } else {
                 const updatedMsg = `🚨 **/${draft.mode.toUpperCase()} DRAFT IN PROGRESS** 🚨\n\n` +
-                    `👑 **Team 1:** ${draft.team1.map(id => `<@${id}>`).join(', ')}\n` +
-                    `👑 **Team 2:** ${draft.team2.map(id => `<@${id}>`).join(', ')}\n\n` +
+                    `👑 **Blue Team:** ${draft.team1.map(id => `<@${id}>`).join(', ')}\n` +
+                    `👑 **Orange Team:** ${draft.team2.map(id => `<@${id}>`).join(', ')}\n\n` +
                     getDraftStatus(draft);
 
                 return interaction.update({
@@ -341,29 +352,37 @@ function getDraftComponent(draft) {
     return new ActionRowBuilder().addComponents(selectMenu);
 }
 
-// 1-hour inactivity timeout checker
+// 1-hour inactivity timeout checker (announces in the channel the player joined from)
 async function checkQueueTimeouts() {
     const ONE_HOUR_MS = 60 * 60 * 1000;
     const now = Date.now();
 
     for (const [mode, q] of Object.entries(queues)) {
-        for (const [userId, joinedAt] of q.entries()) {
-            if (now - joinedAt >= ONE_HOUR_MS) {
-                q.delete(userId);
+        const targetSize = mode === '4mans' ? 4 : 6;
 
-                const targetSize = mode === '4mans' ? 4 : 6;
-                const channelId = queueChannels[mode];
+        // Collect expired players first, then remove them
+        const expired = [];
+        for (const [userId, entry] of q.entries()) {
+            if (now - entry.joinedAt >= ONE_HOUR_MS) {
+                expired.push([userId, entry]);
+            }
+        }
+        for (const [userId] of expired) {
+            q.delete(userId);
+        }
 
-                if (channelId) {
-                    try {
-                        const channel = await client.channels.fetch(channelId);
-                        if (channel) {
-                            channel.send(`⏰ <@${userId}> was automatically removed from the **/${mode}** queue due to 1 hour of inactivity. (${q.size}/${targetSize})`);
-                        }
-                    } catch (err) {
-                        console.error('Failed to send timeout notification:', err);
-                    }
-                }
+        for (const [userId, entry] of expired) {
+            const remainingCount = q.size;
+
+            // Announce in the channel they queued from (pings the player)
+            try {
+                const channel = await client.channels.fetch(entry.channelId);
+                await channel.send(
+                    `⏰ <@${userId}>, you have been automatically removed from the **/${mode}** queue due to 1 hour of inactivity. ` +
+                    `There are still **${remainingCount}** player(s) remaining in the queue (${remainingCount}/${targetSize}).`
+                );
+            } catch (err) {
+                console.error('Failed to send timeout notification:', err);
             }
         }
     }
